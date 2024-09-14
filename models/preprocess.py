@@ -1,66 +1,124 @@
-import os
-from PIL import Image
 import numpy as np
-import pandas as pd
-import sys
+import os
+import argparse
+import tensorflow as tf
+import logging
 
-def preprocess_image(image_path, target_size=(224, 224)):
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def load_data_from_directory(directory):
+    x_data = []
+    y_data = []
+    files_processed = 0
+    labels_found = 0
+
+    logging.info(f"Attempting to load data from directory: {directory}")
+
+    # Check if the directory exists
+    if not os.path.exists(directory):
+        raise FileNotFoundError(f"The specified directory does not exist: {directory}")
+
+    # Iterate through all files in the directory
+    for file_name in sorted(os.listdir(directory)):
+        if file_name.endswith('.npy') and not file_name.endswith('_labels.npy'):
+            image_file = os.path.join(directory, file_name)
+            
+            # Attempt to load the image data
+            try:
+                images = np.load(image_file)
+                x_data.append(images)
+                files_processed += 1
+                logging.info(f"Loaded image data from: {file_name}")
+                
+                # Check if a corresponding label file exists
+                label_file = image_file.replace('.npy', '_labels.npy')
+                if os.path.exists(label_file):
+                    labels = np.load(label_file)
+                    y_data.append(labels)
+                    labels_found += 1
+                    logging.info(f"Loaded labels from: {os.path.basename(label_file)}")
+                else:
+                    # Handle missing label files
+                    logging.warning(f"Label file {os.path.basename(label_file)} not found, generating synthetic labels.")
+                    # Generate synthetic labels (e.g., zeros or other default values)
+                    # Adjust the synthetic label shape based on your model's requirement
+                    synthetic_labels = np.zeros((images.shape[0], 1))  # Adjust shape if needed
+                    y_data.append(synthetic_labels)
+                
+            except Exception as e:
+                logging.error(f"Error loading data from {file_name}: {e}")
+
+    # Convert lists to numpy arrays
+    if x_data:
+        x_data = np.concatenate(x_data)
+    if y_data:
+        y_data = np.concatenate(y_data)
+
+    logging.info(f"Processed {files_processed} image files.")
+    logging.info(f"Found labels for {labels_found} image files.")
+    logging.info(f"Generated synthetic labels for {files_processed - labels_found} image files.")
+
+    if x_data.size == 0:
+        raise ValueError("No image data found in the specified directory.")
+    
+    return x_data, y_data
+
+def build_model(input_shape):
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=input_shape),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(10, activation='softmax')
+    ])
+    model.compile(optimizer='adam',
+                  loss='sparse_categorical_crossentropy',
+                  metrics=['accuracy'])
+    return model
+
+def train_model(model, x_data, y_data, epochs=5, batch_size=32):
     try:
-        with Image.open(image_path) as img:
-            img = img.resize(target_size)
-            img_array = np.array(img) / 255.0  # Normalize pixel values to [0, 1]
-            if img_array.shape[-1] != 3:  # Ensure image has 3 channels (RGB)
-                raise ValueError(f"Image {image_path} does not have 3 channels")
-            return img_array
+        history = model.fit(x_data, y_data, epochs=epochs, batch_size=batch_size, validation_split=0.2)
+        return history
     except Exception as e:
-        print(f"Error preprocessing image {image_path}: {e}")
-        return None
+        logging.error(f"Error during model training: {e}")
+        raise
 
-def preprocess_batch(image_paths, target_size=(224, 224)):
-    images = []
-    for image_path in image_paths:
-        img_array = preprocess_image(image_path, target_size)
-        if img_array is not None:
-            images.append(img_array)
-        else:
-            print(f"Skipping {image_path} due to preprocessing error.")
-    
-    if not images:
-        raise ValueError("No valid images found for preprocessing.")
-    
-    return np.array(images)
+def save_model(model, filename='trained_model.h5'):
+    try:
+        model.save(filename)
+        logging.info(f"Model saved as '{filename}'")
+    except Exception as e:
+        logging.error(f"Error saving model: {e}")
+        raise
+
+def main(data_directory):
+    logging.info("Starting data load...")
+    try:
+        x_data, y_data = load_data_from_directory(data_directory)
+        
+        logging.info(f"Data shape: {x_data.shape}")
+        logging.info(f"Labels shape: {y_data.shape}")
+
+        model = build_model(input_shape=x_data.shape[1:])
+        logging.info("Model built successfully.")
+
+        logging.info("Starting model training...")
+        history = train_model(model, x_data, y_data)
+        
+        logging.info("Training completed. Saving model...")
+        save_model(model)
+
+        # Optional: You can add code here to plot training history or perform model evaluation
+        
+    except Exception as e:
+        logging.error(f"An error occurred during the process: {e}")
+        raise
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python preprocess.py <csv_file> <output_folder>")
-        sys.exit(1)
-
-    csv_file = sys.argv[1]
-    output_folder = sys.argv[2]
+    parser = argparse.ArgumentParser(description='Train a model with image data.')
+    parser.add_argument('data_directory', type=str, help='Directory containing the preprocessed image data.')
+    args = parser.parse_args()
     
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    
-    try:
-        df = pd.read_csv(csv_file)
-        image_links = df['image_link'].tolist()
-        image_paths = [os.path.join('data/images', os.path.basename(link)) for link in image_links]
-        
-        if not image_paths:
-            print(f"No images found in the CSV file.")
-            sys.exit(1)
-        
-        # Preprocess images in batches and save them
-        batch_size = 100  # Adjust batch size as needed
-        for i in range(0, len(image_paths), batch_size):
-            batch_paths = image_paths[i:i + batch_size]
-            preprocessed_images = preprocess_batch(batch_paths)
-            
-            # Save preprocessed images as npy files
-            output_file = os.path.join(output_folder, f'batch_{i // batch_size}.npy')
-            np.save(output_file, preprocessed_images)
-            print(f"Saved batch {i // batch_size} of images to {output_file}.")
-    
-    except Exception as e:
-        print(f"Error processing CSV file: {e}")
-        sys.exit(1)
+    main(args.data_directory)
